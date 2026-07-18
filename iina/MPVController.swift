@@ -93,6 +93,11 @@ class MPVController: NSObject {
   var mpv: OpaquePointer!
   var mpvRenderContext: OpaquePointer?
 
+  /// `true` when mpv is configured to render directly into the video view via `vo=avfoundation`
+  /// and `--wid`, bypassing the OpenGL `mpv_render_context` entirely. Set once in `mpvInit()`.
+  /// See `Preference.Key.useAVFoundationEmbed`.
+  private(set) var isEmbedded = false
+
   private var openGLContext: CGLContextObj! = nil
 
   /// [DispatchQueue](https://developer.apple.com/documentation/dispatch/dispatchqueue) for reading `mpv`
@@ -319,6 +324,11 @@ class MPVController: NSObject {
     // Create a new mpv instance and an associated client API handle to control the mpv instance.
     mpv = mpv_create()
 
+    // Opt-in: embed vo=avfoundation directly into the video view instead of driving an OpenGL
+    // mpv_render_context. The environment variable override is for testing without a UI toggle.
+    isEmbedded = Preference.bool(for: .useAVFoundationEmbed) ||
+      ProcessInfo.processInfo.environment["IINA_VO_AVFOUNDATION"] == "1"
+
     // User default settings
 
     if Preference.bool(for: .enableInitialVolume) {
@@ -541,16 +551,21 @@ class MPVController: NSObject {
                     Preference.RTSPTransportation)
     }
 
-    setUserOption(PK.ytdlEnabled, type: .other, forName: MPVOption.ProgramBehavior.ytdl,
-                  verboseIfDefault: true) { key in
-      let v = Preference.bool(for: .ytdlEnabled)
-      if JavascriptPlugin.hasYTDL {
-        return "no"
+    // This fork's custom libmpv is built without Lua, so the ytdl_hook script's
+    // `ytdl` / `ytdl-raw-options` options do not exist; setting them would pop
+    // an error alert. Skip them. (Rebuild mpv with -Dlua=enabled to restore.)
+    if MPVOptionDefaults.shared.getString(MPVOption.ProgramBehavior.ytdl) != nil {
+      setUserOption(PK.ytdlEnabled, type: .other, forName: MPVOption.ProgramBehavior.ytdl,
+                    verboseIfDefault: true) { key in
+        let v = Preference.bool(for: .ytdlEnabled)
+        if JavascriptPlugin.hasYTDL {
+          return "no"
+        }
+        return v ? "yes" : "no"
       }
-      return v ? "yes" : "no"
+      setUserOption(PK.ytdlRawOptions, type: .string, forName: MPVOption.ProgramBehavior.ytdlRawOptions,
+                    verboseIfDefault: true)
     }
-    setUserOption(PK.ytdlRawOptions, type: .string, forName: MPVOption.ProgramBehavior.ytdlRawOptions,
-                  verboseIfDefault: true)
     chkErr(setOptionString(MPVOption.ProgramBehavior.resetOnNextFile,
             "\(MPVOption.PlaybackControl.abLoopA),\(MPVOption.PlaybackControl.abLoopB)", level: .verbose))
 
@@ -661,9 +676,32 @@ class MPVController: NSObject {
 
     // Set options that can be override by user's config. mpv will log user config when initialize,
     // so we put them here.
-    chkErr(setOptionString(MPVOption.Video.vo, "libmpv", level: .verbose))
+    if isEmbedded {
+      // mpv renders directly into the video view via its own vo=avfoundation, instead of IINA
+      // driving an OpenGL mpv_render_context. The `wid` option is set later, in
+      // `setEmbeddedWid(_:)`, once the video view exists (see `PlayerCore.initVideo()`).
+      chkErr(setOptionString(MPVOption.Video.vo, "avfoundation", level: .verbose))
+      chkErr(setOptionString(MPVOption.Video.hwdec, "videotoolbox", level: .verbose))
+    } else {
+      chkErr(setOptionString(MPVOption.Video.vo, "libmpv", level: .verbose))
+    }
     chkErr(setOptionString(MPVOption.Window.keepaspect, "yes", level: .verbose))
     chkErr(setOptionString(MPVOption.Video.gpuHwdecInterop, "auto", level: .verbose))
+  }
+
+  /// Set the `wid` option so mpv's `vo=avfoundation` embeds directly into `view` instead of
+  /// creating its own window.
+  ///
+  /// - Important: This must be called after `view` exists and is attached to its window (e.g.
+  ///     from `PlayerCore.initVideo()`, which runs after `MainWindowController.addVideoViewToWindow()`).
+  ///     It must **not** be called from `mpvInit()`: `PlayerCore.mainWindow.videoView` is a lazy
+  ///     property that, if first accessed before the window has loaded, synchronously triggers
+  ///     `NSWindowController.window` to load the nib and run `windowDidLoad()`, which itself calls
+  ///     `PlayerCore.initVideo()` -- reentering mpv setup while `mpvInit()` is still on the stack.
+  func setEmbeddedWid(_ view: NSView) {
+    guard isEmbedded else { return }
+    let wid = Int64(Int(bitPattern: Unmanaged.passUnretained(view).toOpaque()))
+    chkErr(setOptionString(MPVOption.Window.wid, String(wid), level: .verbose))
   }
 
   /// Initialize the `mpv` renderer.
@@ -707,20 +745,27 @@ class MPVController: NSObject {
   /// - Reference: [OpenGL Context](https://www.khronos.org/opengl/wiki/OpenGL_Context)
   /// - Attention: Do not forget to unlock the OpenGL context by calling `unlockOpenGLContext`
   func lockAndSetOpenGLContext() {
+    // In embedded mode there is no OpenGL render context to lock (see `isEmbedded`).
+    guard !isEmbedded else { return }
     CGLLockContext(openGLContext)
     CGLSetCurrentContext(openGLContext)
   }
 
   /// Unlock the OpenGL context associated with the mpv renderer.
   func unlockOpenGLContext() {
+    guard !isEmbedded else { return }
     CGLUnlockContext(openGLContext)
   }
 
   func mpvUninitRendering() {
-    guard let mpvRenderContext = mpvRenderContext else { return }
-    mpv_render_context_set_update_callback(mpvRenderContext, nil, nil)
-    mpv_render_context_free(mpvRenderContext)
-    self.mpvRenderContext = nil
+    // In embedded mode `mpvRenderContext` is nil by design (no OpenGL render context was ever
+    // created). `mpv_destroy` must still run in that case, so it cannot live behind a guard that
+    // returns early when `mpvRenderContext` is nil.
+    if let mpvRenderContext = mpvRenderContext {
+      mpv_render_context_set_update_callback(mpvRenderContext, nil, nil)
+      mpv_render_context_free(mpvRenderContext)
+      self.mpvRenderContext = nil
+    }
     mpv_destroy(mpv)
     mpv = nil
   }
@@ -1760,9 +1805,12 @@ class MPVController: NSObject {
    */
   private func chkErr(_ status: Int32!) {
     guard status < 0 else { return }
-    DispatchQueue.main.async {
-      Logger.fatal("mpv API error: \"\(String(cString: mpv_error_string(status)))\", Return value: \(status!).")
-    }
+    // This fork links a custom libmpv built from mpv master, which differs from
+    // the mpv version stock IINA targets: a few options/properties IINA sets no
+    // longer exist. Log the error and continue instead of treating every mpv
+    // API error as fatal (which would abort the app on a harmless option skew).
+    Logger.log("mpv API error: \"\(String(cString: mpv_error_string(status)))\" (\(status!))",
+               level: .error, subsystem: subsystem)
   }
 
   private func log(_ message: @autoclosure () -> String, level: Logger.Level = .debug) {

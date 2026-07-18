@@ -568,7 +568,13 @@ class PlayerCore: NSObject {
 
     // Delay force-window until an actual file load to avoid Xcode-launched app startup hanging
     // while mpv tries to create a VO before IINA has entered its normal media-open path.
-    mpv.setString(MPVOption.Window.forceWindow, "yes", level: .verbose)
+    // In embedded (vo=avfoundation) mode, do NOT set force-window on this (main) thread: it
+    // would create the VO synchronously (vo_create -> mp_rendezvous) and deadlock against the
+    // VO preinit's DispatchQueue.main.sync. The loadfile below creates the VO on mpv's core
+    // thread instead, which is deadlock-free.
+    if !mpv.isEmbedded {
+      mpv.setString(MPVOption.Window.forceWindow, "yes", level: .verbose)
+    }
 
     // Send load file command
     info.justOpenedFile = true
@@ -665,12 +671,23 @@ class PlayerCore: NSObject {
   }
 
   func initVideo() {
-    // init mpv render context.
-    mpv.mpvInitRendering()
-    // `force-window=immediate` makes audio-only subtitle rendering work with `vo=libmpv`,
-    // but setting it before render initialization can race the VO thread against IINA's
-    // render context setup. Switch to `immediate` only after the render context exists.
-    mpv.setString(MPVOption.Window.forceWindow, "immediate", level: .verbose)
+    if mpv.isEmbedded {
+      // No OpenGL render context: mpv's own vo=avfoundation renders directly into the video view.
+      // The video view is guaranteed to exist and be attached to the window here, since this is
+      // called right after `MainWindowController.addVideoViewToWindow()`.
+      mpv.setEmbeddedWid(mainWindow.videoView)
+      // NOTE: do NOT set `force-window=immediate` here. This runs on the main thread, and with
+      // vo=avfoundation it would create the VO synchronously (vo_create -> mp_rendezvous),
+      // blocking the main thread while the VO's preinit does DispatchQueue.main.sync -> deadlock.
+      // The VO is created on mpv's core thread when a file loads, which is deadlock-free.
+    } else {
+      // init mpv render context.
+      mpv.mpvInitRendering()
+      // `force-window=immediate` makes audio-only subtitle rendering work with `vo=libmpv`,
+      // but setting it before render initialization can race the VO thread against IINA's
+      // render context setup. Switch to `immediate` only after the render context exists.
+      mpv.setString(MPVOption.Window.forceWindow, "immediate", level: .verbose)
+    }
     mainWindow.videoView.startDisplayLink()
     log("Initialized rendering")
     MemoryUsage.shared.logUsage("after rendering initialized")

@@ -184,6 +184,10 @@ struct Preference {
     static let videoThreads = Key("videoThreads")
     static let hardwareDecoder = Key("hardwareDecoder")
     static let forceDedicatedGPU = Key("forceDedicatedGPU")
+    /// Opt-in: embed mpv's `vo=avfoundation` directly into the video view via `--wid`, instead of
+    /// driving an OpenGL `mpv_render_context`. Can also be enabled by setting the environment
+    /// variable `IINA_VO_AVFOUNDATION=1`. See `MPVController.isEmbedded`.
+    static let useAVFoundationEmbed = Key("useAVFoundationEmbed")
     static let loadIccProfile = Key("loadIccProfile")
     static let enableHdrSupport = Key("enableHdrSupport")
     static let enableToneMapping = Key("enableToneMapping")
@@ -1108,6 +1112,7 @@ struct Preference {
     .videoThreads: 0,
     .hardwareDecoder: HardwareDecoderOption.auto.rawValue,
     .forceDedicatedGPU: false,
+    .useAVFoundationEmbed: false,
     .loadIccProfile: true,
     .enableHdrSupport: true,
     .enableToneMapping: false,
