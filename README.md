@@ -14,6 +14,37 @@
 
 ---
 [![Crowdin](https://badges.crowdin.net/iina/localized.svg)](https://crowdin.com/project/iina)
+
+## Fork: embedded AVFoundation video output (Parallels VM)
+
+This fork can render video through mpv's `vo=avfoundation` embedded directly into IINA's
+window, instead of IINA's default OpenGL (`vo=libmpv`) render path. Motivation: inside a
+Parallels macOS VM the OpenGL path renders a black/grid-corrupted image; the AVFoundation
+path (what QuickTime uses) works.
+
+It's **opt-in** and off by default; the normal OpenGL path is unchanged when off. Enable
+with:
+
+```console
+defaults write com.colliderli.iina useAVFoundationEmbed -bool true
+```
+
+or the env var `IINA_VO_AVFOUNDATION=1`. When on, IINA sets `vo=avfoundation` +
+`hwdec=videotoolbox` + `--wid=<video view>` and skips its OpenGL render context; mpv
+renders its `AVSampleBufferDisplayLayer` into IINA's video view.
+
+It requires a **custom libmpv** built from the sibling mpv fork
+([`KlassyCoder/mpv-mac`](https://github.com/KlassyCoder/mpv-mac), branch
+`vo-avfoundation`) that provides `vo_avfoundation` and `--wid`. See
+[`AVFOUNDATION-BUILD.md`](AVFOUNDATION-BUILD.md) in this repo for the full build recipe.
+
+Changed files: `iina/Preference.swift`, `iina/MPVController.swift`,
+`iina/PlayerCore.swift`.
+
+Limitations of this build: no OSD/subtitles over the video; the bundled custom libmpv is
+a reduced feature set (no libavdevice, no Lua, so `--ytdl`/built-in scripts are absent);
+it's a Debug/arm64/ad-hoc test build. Details in [`AVFOUNDATION-BUILD.md`](AVFOUNDATION-BUILD.md).
+
 ## Features
 
 * Based on [mpv](https://github.com/mpv-player/mpv), which provides the best decoding capacity on macOS
