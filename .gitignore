@@ -114,3 +114,10 @@ browser/Firefox_Open_In_IINA/*
 deps/executable/youtube-dl
 deps/plugins
 
+
+# --- fork-local: build output, downloaded libs, test bundles ---
+/build-out/
+/deps/lib/
+/deps/executable/
+/IINA-avf-*.tgz
+/.claude/
